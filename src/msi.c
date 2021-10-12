@@ -9,6 +9,8 @@
  * code will be 0.
  *
  * Written by Chad Trabant, IRIS Data Management Center.
+ *
+ * trial - 2021-09-20 - adding psql Mike Stults IRIS DMC
  ***************************************************************************/
 
 #include <stdio.h>
@@ -21,6 +23,8 @@
 
 #include <libmseed.h>
 
+#include "libpq-fe.h"
+
 static int processparam (int argcount, char **argvec);
 static char *getoptval (int argcount, char **argvec, int argopt);
 static int readregexfile (char *regexfile, char **pppattern);
@@ -29,7 +33,7 @@ static int addfile (char *filename);
 static int addlistfile (char *filename);
 static void usage (void);
 
-#define VERSION "3.8"
+#define VERSION "0.75"
 #define PACKAGE "msi"
 
 static flag    verbose      = 0;
@@ -70,6 +74,17 @@ struct filelink {
 struct filelink *filelist = 0;
 struct filelink *filelisttail = 0;
 
+/** timescaleDB */
+static void
+do_pg_exit(PGconn *conn)
+{
+		fprintf(stderr, "***** TimescaleDb - Calling PQfinish\n");
+    PQfinish(conn);
+    exit(1);
+}
+static PGconn *pg_conn = 0;
+static PGresult *pg_result = 0;
+static char pg_pw[100] = "not";
 
 int
 main (int argc, char **argv)
@@ -93,11 +108,43 @@ main (int argc, char **argv)
   
   /* Set default error message prefix */
   ms_loginit (NULL, NULL, NULL, "ERROR: ");
+
+  /** timescaleDB */
+  int timescaleDb_ver = PQlibVersion();
+  printf("***** TimescaleDb - libpq verison: %d\n", timescaleDb_ver);
+
+  printf("***** enter db password('nodb' to not use db'): ");
+  gets(pg_pw);
+  char pg_connstr[200];
+  sprintf(pg_connstr, "host=localhost port=5452 user=postgres dbname=postgres password=%s", pg_pw);
+
+  if (strcmp(pg_pw, "nodb") == 0)
+  {
+    // noop - not using db
+  } else
+  {
+	  pg_conn = PQconnectdb(pg_connstr);
+
+	  if (PQstatus(pg_conn) == CONNECTION_BAD) {
+	      fprintf(stderr, "***** TimescaleDb - Connection to database failed: %s\n",
+	          PQerrorMessage(pg_conn));
+	      do_pg_exit(pg_conn);
+	  }
+
+	  int ver = PQserverVersion(pg_conn);
+
+	  printf("***** TimescaleDb - Server version: %d\n", ver);
+
+	  fprintf(stderr, "***** TimescaleDb - inline calling PQfinish\n");
+	  //PQfinish(pg_conn);
+	  /** timescaleDB */
+  }
+
   
   /* Process given parameters (command line and parameter file) */
   if ( processparam (argc, argv) < 0 )
     return 1;
-  
+
   /* Read leap second list file if env. var. LIBMSEED_LEAPSECOND_FILE is set */
   ms_readleapseconds ("LIBMSEED_LEAPSECOND_FILE");
   
@@ -250,11 +297,61 @@ main (int argc, char **argv)
 	      if ( printraw )
 		ms_parse_raw (msr->record, msr->reclen, ppackets, -1);
 	      else
+	      {
+				  if (strcmp(pg_pw, "nodb") == 0)
+				  {
+				    // noop - not using db
+				  } else
+				  {
+            /* TimescaleDB */
+		        char sqlstatement[512];
+
+		        char isotimestr[27] = "";
+		        int8_t subseconds_flag = 1;
+		        ms_hptime2isotimestr (msr->starttime, isotimestr, subseconds_flag);
+		        fprintf(stderr, "***** starttime: %lld  isotimstr: %s\n", msr->starttime, isotimestr);
+
+		        sprintf(sqlstatement, "INSERT INTO miniseed_times_1 (time,network,station,location,channel,quality) VALUES ('%s', '%s', '%s', '%s', '%s', '%c'); ",
+	              isotimestr, msr->network,
+		            msr->station, msr->location, msr->channel, msr->dataquality);
+
+		        fprintf(stderr, "***** do msr_print sql: %s\n", sqlstatement);
+
+
+	          /* Start a transaction block */
+	          pg_result = PQexec(pg_conn, "BEGIN");
+	          if (PQresultStatus(pg_result) == PGRES_COMMAND_OK)
+	          {
+				      /* Execute SQL insert */
+				      PQclear(pg_result);
+							pg_result = PQexec(pg_conn, sqlstatement);
+							if (PQresultStatus(pg_result) == PGRES_COMMAND_OK)
+	            {
+	              fprintf(stderr, "***** insert complete\n");
+	            } else
+	            {
+	              fprintf(stderr, "***** insert failed\n");
+	            }
+	            PQclear(pg_result);
+	            PQexec(pg_conn, "END");
+	            fprintf(stderr, "***** insert transaction end\n");
+	          } else
+	          {
+              PQclear(pg_result);
+	            fprintf(stderr, "***** start transaction failed\n");
+	          }
+	          /* TimescaleDB */
+	        }
+
 		msr_print (msr, ppackets);
+				}
 	    }
 	  
 	  if ( tracegapsum || tracegaponly )
-	    mstl_addmsr (mstl, msr, dataquality, 1, timetol, sampratetol);
+	  {
+      fprintf(stderr, "***** trace\n");
+      mstl_addmsr (mstl, msr, dataquality, 1, timetol, sampratetol);
+	  }
 	  
 	  if ( dataflag )
 	    {
@@ -363,6 +460,17 @@ main (int argc, char **argv)
       flp = flp->next;
     } /* End of looping over file list */
   
+  if (strcmp(pg_pw, "nodb") == 0)
+  {
+    // noop - not using db
+  } else
+  {
+	  /* TimescaleDB */
+	  fprintf(stderr, "***** finish pg connection");
+	  PQfinish(pg_conn);
+	}
+
+
   if ( binfile )
     fclose (bfp);
   

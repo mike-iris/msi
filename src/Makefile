@@ -6,15 +6,17 @@
 
 # Options specific for GCC
 GCC = gcc
-GCCFLAGS = -O2 -Wall -I../libmseed
+GCCFLAGS = -O2 -Wall -I../libmseed -I/usr/local/pgsql/include
+CFLAGS = -I/usr/local/pgsql/include
+
 
 # Required compiler parameters
 REQCFLAGS = -I../libmseed
 
 BIN = msi
 
-LDFLAGS = -L../libmseed
-LDLIBS = -lmseed
+LDFLAGS = -L../libmseed -L/usr/local/pgsql/lib
+LDLIBS = -lmseed -lpq
 
 OBJS = $(BIN).o
 
