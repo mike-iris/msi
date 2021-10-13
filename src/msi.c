@@ -114,7 +114,9 @@ main (int argc, char **argv)
   printf("***** TimescaleDb - libpq verison: %d\n", timescaleDb_ver);
 
   printf("***** enter db password('nodb' to not use db'): ");
-  gets(pg_pw);
+  fgets(pg_pw, 100, stdin);
+  pg_pw[strcspn(pg_pw, "\r\n")] = 0;
+
   char pg_connstr[200];
   sprintf(pg_connstr, "host=localhost port=5452 user=postgres dbname=postgres password=%s", pg_pw);
 
@@ -304,16 +306,31 @@ main (int argc, char **argv)
 				  } else
 				  {
             /* TimescaleDB */
-		        char sqlstatement[512];
+            size_t max_sql_len = 2048;
+		        char sqlstatement[max_sql_len];
 
 		        char isotimestr[27] = "";
 		        int8_t subseconds_flag = 1;
 		        ms_hptime2isotimestr (msr->starttime, isotimestr, subseconds_flag);
 		        fprintf(stderr, "***** starttime: %lld  isotimstr: %s\n", msr->starttime, isotimestr);
 
-		        sprintf(sqlstatement, "INSERT INTO miniseed_times_1 (time,network,station,location,channel,quality) VALUES ('%s', '%s', '%s', '%s', '%s', '%c'); ",
-	              isotimestr, msr->network,
-		            msr->station, msr->location, msr->channel, msr->dataquality);
+		        char hex_val[3];
+		        int hex_record_size = 512 * 2 + 1;
+		        char hex_record[hex_record_size];
+		        hex_record[0]=0;
+		        unsigned char * datum = (unsigned char *)msr->record;
+		        for (int idx = 0; idx < msr->reclen; idx++, datum++) {
+              snprintf(hex_val, 3, "%02hhx", *datum);
+              strlcat(hex_record, hex_val, hex_record_size);
+		        }
+
+		        if (snprintf(sqlstatement, max_sql_len,
+		            "INSERT INTO miniseed_times_1 (time,network,station,location,channel,quality) VALUES ('%s', '%s', '%s', '%s', '%s', '%c'); INSERT INTO miniseed_times_3 (time,network,station,location,channel,quality,packet) VALUES ('%s', '%s', '%s', '%s', '%s', '%c', '\\x%s'); ",
+	              isotimestr, msr->network,msr->station, msr->location, msr->channel, msr->dataquality,
+	              isotimestr, msr->network,msr->station, msr->location, msr->channel, msr->dataquality, hex_record
+		            ) >= max_sql_len) {
+              fprintf(stderr, "***** max_sql_len exceeded");
+		        }
 
 		        fprintf(stderr, "***** do msr_print sql: %s\n", sqlstatement);
 
@@ -327,20 +344,20 @@ main (int argc, char **argv)
 							pg_result = PQexec(pg_conn, sqlstatement);
 							if (PQresultStatus(pg_result) == PGRES_COMMAND_OK)
 	            {
-	              fprintf(stderr, "***** insert complete\n");
+	              fprintf(stderr, "***** insert miniseed_times_1 complete\n");
 	            } else
 	            {
-	              fprintf(stderr, "***** insert failed\n");
+	              fprintf(stderr, "***** insert miniseed_times_1 failed\n");
 	            }
 	            PQclear(pg_result);
 	            PQexec(pg_conn, "END");
-	            fprintf(stderr, "***** insert transaction end\n");
+	            fprintf(stderr, "***** insert miniseed_times_1 transaction end\n");
 	          } else
 	          {
               PQclear(pg_result);
-	            fprintf(stderr, "***** start transaction failed\n");
+	            fprintf(stderr, "***** start miniseed_times_1 transaction failed\n");
 	          }
-	          /* TimescaleDB */
+	          /* end TimescaleDB */
 	        }
 
 		msr_print (msr, ppackets);
@@ -395,32 +412,124 @@ main (int argc, char **argv)
 			}
 		    }
 		  else
+		  {
+				size_t max_sql_size = 180000;
+				char sql_insert_samples[max_sql_size];
+				sql_insert_samples[0] = 0;
+
+				int sample_value_len = 0;
+				size_t sample_value_max_len = 50;
+				char sample_value[sample_value_max_len];
+				sample_value[0] = 0;
+
+				int row_len = 0;
+				size_t row_max_len = 200;
+				char row[row_max_len];
+				row[0] = 0;
+
+				char isotimestr[27] = "";
+				int8_t subseconds_flag = 1;
+
+				hptime_t thistime = 0;
+
 		    for ( cnt = 0, line = 0; line < lines; line++ )
 		      {
+            //fprintf(stderr, "***** line of 6\n");
 			for ( col = 0; col < 6 ; col ++ )
 			  {
 			    if ( cnt < msr->numsamples )
 			      {
 				sptr = (char*)msr->datasamples + (cnt * samplesize);
-				
+
+				double addit = cnt * 1.0/msr->samprate;
+				hptime_t hp_addit = (hptime_t)(addit * 1000000.0);
+				thistime = msr->starttime + (hptime_t)hp_addit;
+				ms_hptime2isotimestr (thistime, isotimestr, subseconds_flag);
+				//fprintf(stderr, "***** iso: %s  thistime: %lld  sr: %f  ti: %f  cnt: %d, add: %f  hp_addit: %lld\n", isotimestr, thistime, msr->samprate, 1.0/msr->samprate, cnt, addit, hp_addit);
+
+				sample_value_len = 0;
 				if ( msr->sampletype == 'i' )
+				{
 				  ms_log (0, "%10d  ", *(int32_t *)sptr);
-				
-				else if ( msr->sampletype == 'f' )
+				  sample_value_len = snprintf(sample_value, sample_value_max_len, "%10d", *(int32_t *)sptr);
+				} else if ( msr->sampletype == 'f' )
+				{
 				  ms_log (0, "%10.8g  ", *(float *)sptr);
-				
-				else if ( msr->sampletype == 'd' )
+				  sample_value_len = snprintf(sample_value, sample_value_max_len, "%10.8g", *(float *)sptr);
+				} else if ( msr->sampletype == 'd' )
+				{
 				  ms_log (0, "%10.10g  ", *(double *)sptr);
-				
+				  sample_value_len = snprintf(sample_value, sample_value_max_len, "%10.10g", *(double *)sptr);
+				}
+
+				if (sample_value_len > 0) {
+					if (sample_value_len < sample_value_max_len) {
+						row_len = snprintf(row, row_max_len,
+						    "INSERT INTO miniseed_times_2 (time,network,station,location,channel,quality,sample) VALUES ('%s', '%s', '%s', '%s', '%s', '%c', %s);  ",
+	              isotimestr, msr->network, msr->station, msr->location, msr->channel, msr->dataquality, sample_value);
+						if (row_len < row_max_len) {
+							if (strlen(sql_insert_samples) + strlen(row) + 1 <= max_sql_size) {
+                if (strlcat(sql_insert_samples, row, max_sql_size) >= max_sql_size) {
+		              fprintf(stderr, "***** buffer sql_insert_samples max size exceeded\n");
+							  }
+							} else {
+                fprintf(stderr, "***** skipping row, max_sql_size will be exceeded\n");
+							}
+						} else {
+	            fprintf(stderr, "***** row_max_len exceeded\n");
+						}
+					} else {
+						fprintf(stderr, "***** sample_value_max_len exceeded\n");
+					}
+				} else {
+          fprintf(stderr, "***** no samples found to insert\n");
+				}
+
 				cnt++;
 			      }
 			  }
+
 			ms_log (0, "\n");
 			
 			/* If only printing the first 6 samples break out here */
 			if ( printdata == 1 )
 			  break;
 		      }
+
+		      /* TimescaleDB */
+		      //fprintf(stderr, "***** samples: %s\n", sql_insert_samples);
+				  if (strcmp(pg_pw, "nodb") == 0)
+				  {
+				    // noop - not using db
+				  } else
+				  {
+	          /* Start a transaction block */
+	          pg_result = PQexec(pg_conn, "BEGIN");
+	          if (PQresultStatus(pg_result) == PGRES_COMMAND_OK)
+	          {
+				      /* Execute SQL insert */
+				      PQclear(pg_result);
+							pg_result = PQexec(pg_conn, sql_insert_samples);
+							if (PQresultStatus(pg_result) == PGRES_COMMAND_OK)
+	            {
+	              fprintf(stderr, "***** insert samples complete\n");
+	            } else
+	            {
+	              fprintf(stderr, "***** insert samples failed\n");
+	            }
+	            PQclear(pg_result);
+	            PQexec(pg_conn, "END");
+	            fprintf(stderr, "***** insert samples transaction end\n");
+	          } else
+	          {
+              PQclear(pg_result);
+	            fprintf(stderr, "***** start samples transaction failed\n");
+	          }
+
+	          /* end TimescaleDB */
+					}
+
+		    }
 		}
 	      
 	      if ( binfile )

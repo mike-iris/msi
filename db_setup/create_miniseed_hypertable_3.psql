@@ -1,0 +1,16 @@
+----------------------------------------
+-- Hypertable to store raw miniseed times
+----------------------------------------
+-- Step 1: Define regular table
+CREATE TABLE IF NOT EXISTS miniseed_times_3 (
+   time TIMESTAMP WITH TIME ZONE NOT NULL,
+   network text not null,
+   station text not null,
+   location text not null,
+   channel text not null,
+   quality text not null,
+   packet bytea not null
+);
+
+-- Step 2: Turn into hypertable
+SELECT create_hypertable('miniseed_times_3','time');
